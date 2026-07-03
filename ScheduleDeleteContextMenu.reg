@@ -1,0 +1,49 @@
+Windows Registry Editor Version 5.00
+
+; Cascaded Context Menu for Files
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete]
+@="Schedule Delete..."
+"Icon"="shell32.dll,27"
+"SubCommands"=""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\open]
+@="Open Scheduler UI"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\open\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\1hour]
+@="Delete in 1 Hour"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\1hour\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 60 \"%1\""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\24hours]
+@="Delete in 24 Hours"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\24hours\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 1440 \"%1\""
+
+; Cascaded Context Menu for Directories
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete]
+@="Schedule Delete..."
+"Icon"="shell32.dll,27"
+"SubCommands"=""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\open]
+@="Open Scheduler UI"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\open\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\1hour]
+@="Delete in 1 Hour"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\1hour\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 60 \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\24hours]
+@="Delete in 24 Hours"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\24hours\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 1440 \"%1\""
