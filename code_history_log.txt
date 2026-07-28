@@ -1,0 +1,1009 @@
+================================================================================
+TIMESTAMP: 2026-07-28 14:00:00
+FILE PATH: ScheduleDelete.ps1
+ACTION: Created
+================================================================================
+param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)]
+    [string[]]$FilePaths,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Silent,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$DelayMinutes = 0
+)
+
+# Robust Logging
+$logFile = Join-Path $env:TEMP "ScheduleDeleteLog.txt"
+function Log-Msg($msg) { "$(Get-Date -Format 'HH:mm:ss') - $msg" | Out-File $logFile -Append }
+Log-Msg "App Started. Paths: $($FilePaths -join ', ')"
+
+try {
+    # Load UI assemblies
+    Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, WindowsBase, System.Xaml, WindowsFormsIntegration
+    Log-Msg "Assemblies loaded"
+
+    # --- Constants & Paths ---
+    $appData = Join-Path $env:APPDATA "ScheduleDelete"
+    $taskDir = Join-Path $appData "Tasks"
+    $queueFile = Join-Path $env:TEMP "ScheduleDeleteQueue.txt"
+    $mutexName = "Global\ScheduleDeleteUI_v2_2"
+
+    if (-not (Test-Path $taskDir)) { New-Item -Path $taskDir -ItemType Directory -Force | Out-Null }
+
+    # --- Admin Check ---
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Log-Msg "Running as Admin: $isAdmin"
+
+    # --- Helper: Schedule Function ---
+    function Register-DeletionTask {
+        param(
+            [string[]]$Paths,
+            [DateTime]$ExecutionTime
+        )
+        
+        if ($Paths.Count -eq 0) { return }
+
+        $uniqueId = [Guid]::NewGuid().ToString().Substring(0,8)
+        $taskName = "DeleteScheduled_" + (Get-Date -Format "yyyyMMdd_HHmm") + "_" + $uniqueId
+        $scriptPath = Join-Path $taskDir ("$taskName.ps1")
+        
+        # Generate a robust PS1 script for the task
+        $pathsString = $Paths | ForEach-Object { "'$($_.Replace("'", "''"))'" }
+        $pathsArray = $pathsString -join ",`n    "
+        
+        $scriptContent = @"
+# Automated Deletion Script generated at $(Get-Date)
+`$paths = @(
+    $pathsArray
+)
+
+`$paths | ForEach-Object {
+    if (Test-Path -LiteralPath `$_) {
+        try {
+            Remove-Item -LiteralPath `$_ -Force -Recurse -ErrorAction SilentlyContinue
+        } catch {
+            "`$((Get-Date).ToString()): Failed to delete `$_" | Out-File (Join-Path "`$env:TEMP" "ScheduleDelete_Errors.log") -Append
+        }
+    }
+}
+
+# Self-destruct script
+Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"@
+        Set-Content -Path $scriptPath -Value $scriptContent -Encoding UTF8
+        
+        # Register the task
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+        
+        # Trigger with proper boundary
+        $trigger = New-ScheduledTaskTrigger -At $ExecutionTime -Once
+        # Task Scheduler requires EndBoundary for some settings to work properly
+        $trigger.EndBoundary = $ExecutionTime.AddHours(24).ToString("yyyy-MM-dd'T'HH:mm:ss")
+        
+        # Robust settings
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DeleteExpiredTaskAfter (New-TimeSpan -Minutes 1)
+        
+        # Principal Handling: If admin, use Highest. If not, use Limited.
+        if ($isAdmin) {
+            $currentPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Highest
+        } else {
+            $currentPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        }
+        
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $currentPrincipal -Description "Scheduled file deletion task" -Force | Out-Null
+        
+        Log-Msg "Task registered: $taskName for $ExecutionTime"
+        return $taskName
+    }
+
+    # --- Silent Mode Handling ---
+    if ($Silent -and $DelayMinutes -gt 0) {
+        $targetTime = (Get-Date).AddMinutes($DelayMinutes)
+        Register-DeletionTask -Paths $FilePaths -ExecutionTime $targetTime
+        Log-Msg "Silent task registered. Exiting."
+        exit
+    }
+
+    # --- Single Instance Logic ---
+    $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+    if (!$mutex.WaitOne(0)) {
+        if ($FilePaths) {
+            $done = $false
+            for ($i=0; $i -lt 5; $i++) {
+                try {
+                    $FilePaths | ForEach-Object { Add-Content -LiteralPath $queueFile -Value $_ -ErrorAction Stop }
+                    $done = $true; break
+                } catch { Start-Sleep -Milliseconds 100 }
+            }
+        }
+        Log-Msg "Another instance running. Paths queued. Exiting."
+        exit
+    }
+
+    # --- WPF UI Design (Premium Fluent Design) ---
+    $xamlString = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wf="clr-namespace:System.Windows.Forms;assembly=System.Windows.Forms"
+        Title="Schedule Delete Pro" Height="680" Width="450" 
+        Background="Transparent" AllowsTransparency="True" WindowStyle="None"
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="True" Topmost="True">
+    
+    <Window.Resources>
+        <Style x:Key="ModernBtn" TargetType="Button">
+            <Setter Property="Background" Value="#FFD700"/>
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="10">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FFFACD"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#444"/>
+                    <Setter Property="Foreground" Value="#888"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="GhostBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#888"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="#444" BorderThickness="1" CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="White"/>
+                    <Setter Property="Background" Value="#333"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="QuickBtn" TargetType="Button" BasedOn="{StaticResource GhostBtn}">
+            <Setter Property="Width" Value="100"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="FontSize" Value="11"/>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="#1A1A1A" CornerRadius="20" BorderBrush="#333" BorderThickness="1.5">
+        <Grid Margin="30">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <Grid Grid.Row="0" Margin="0,0,0,25">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Schedule" Foreground="Gold" FontSize="26" FontWeight="Bold"/>
+                    <TextBlock Text=" Delete Pro" Foreground="White" FontSize="26" FontWeight="Light"/>
+                </StackPanel>
+                <Button Name="CloseBtn" Content="✕" Background="Transparent" Foreground="Gray" BorderThickness="0" HorizontalAlignment="Right" VerticalAlignment="Top" FontSize="18" Padding="5"/>
+            </Grid>
+
+            <!-- File List Section -->
+            <Grid Grid.Row="1" Margin="0,0,0,10">
+                <TextBlock Text="SELECTED ITEMS" Foreground="#666" FontSize="10" FontWeight="Black" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Name="AddBtn" Style="{StaticResource GhostBtn}" Content="+ Add" Width="60" Height="22" FontSize="9" Margin="0,0,5,0"/>
+                    <Button Name="ClearBtn" Style="{StaticResource GhostBtn}" Content="Clear All" Width="70" Height="22" FontSize="9"/>
+                </StackPanel>
+            </Grid>
+            
+            <Border Grid.Row="2" Background="#222" CornerRadius="12" Padding="8" Margin="0,0,0,20">
+                <ListBox Name="FileListBox" Background="Transparent" BorderThickness="0" Foreground="#DDD" 
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled" AllowDrop="True">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="2">
+                                <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis" FontSize="13"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+
+            <!-- Date/Time Section -->
+            <StackPanel Grid.Row="3" Margin="0,0,0,10">
+                <TextBlock Text="EXECUTION TIME" Foreground="#666" FontSize="10" FontWeight="Black"/>
+            </StackPanel>
+            
+            <WindowsFormsHost Grid.Row="4" Height="42" Margin="0,0,0,15">
+                <wf:DateTimePicker x:Name="WFDateTimePicker" />
+            </WindowsFormsHost>
+
+            <!-- Quick Selection -->
+            <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,25">
+                <Button Name="BtnPlus10m" Style="{StaticResource QuickBtn}" Content="+10 Minutes"/>
+                <Button Name="BtnPlus1h" Style="{StaticResource QuickBtn}" Content="+1 Hour"/>
+                <Button Name="BtnPlus1d" Style="{StaticResource QuickBtn}" Content="+24 Hours" Margin="0"/>
+            </StackPanel>
+
+            <!-- Actions -->
+            <Button Grid.Row="6" Name="ScheduleBtn" Style="{StaticResource ModernBtn}" Content="Schedule Deletion Task" Height="55" FontSize="15"/>
+            <TextBlock Name="StatusLabel" Grid.Row="7" Text="Ready to schedule" Foreground="#444" HorizontalAlignment="Center" Margin="0,15,0,0" FontSize="11"/>
+        </Grid>
+    </Border>
+</Window>
+"@
+
+    Log-Msg "Parsing XAML"
+    $window = [Windows.Markup.XamlReader]::Parse($xamlString)
+
+    # --- UI Logic Binding ---
+    $fileListBox = $window.FindName("FileListBox")
+    $scheduleBtn = $window.FindName("ScheduleBtn")
+    $closeBtn = $window.FindName("CloseBtn")
+    $addBtn = $window.FindName("AddBtn")
+    $clearBtn = $window.FindName("ClearBtn")
+    $statusLabel = $window.FindName("StatusLabel")
+    $dtPicker = $window.FindName("WFDateTimePicker")
+    
+    $btn10m = $window.FindName("BtnPlus10m")
+    $btn1h = $window.FindName("BtnPlus1h")
+    $btn1d = $window.FindName("BtnPlus1d")
+
+    # WinForms DateTimePicker styling
+    $dtPicker.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+    $dtPicker.CustomFormat = "MMMM dd, yyyy  at  HH:mm"
+    $dtPicker.Value = (Get-Date).AddHours(1)
+    $dtPicker.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+
+    # Initialize file list
+    $allPaths = New-Object System.Collections.ObjectModel.ObservableCollection[string]
+    function Add-Path($p) {
+        if ($p -and (Test-Path -LiteralPath $p) -and -not $allPaths.Contains($p)) {
+            $allPaths.Add($p)
+            Log-Msg "Added path: $p"
+        }
+    }
+
+    if ($FilePaths) { $FilePaths | ForEach-Object { Add-Path $_ } }
+    $fileListBox.ItemsSource = $allPaths
+
+    # Events
+    $window.Add_MouseLeftButtonDown({ $window.DragMove() })
+    $closeBtn.Add_Click({ $window.Close() })
+    $clearBtn.Add_Click({ $allPaths.Clear() })
+    
+    $btn10m.Add_Click({ $dtPicker.Value = (Get-Date).AddMinutes(10) })
+    $btn1h.Add_Click({ $dtPicker.Value = (Get-Date).AddHours(1) })
+    $btn1d.Add_Click({ $dtPicker.Value = (Get-Date).AddDays(1) })
+
+    $addBtn.Add_Click({
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Multiselect = $true
+        $dialog.Title = "Select Files to Schedule"
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $dialog.FileNames | ForEach-Object { Add-Path $_ }
+        }
+    })
+
+    # Drag & Drop support
+    $fileListBox.Add_Drop({
+        param($s, $e)
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+            $files = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
+            foreach ($f in $files) { Add-Path $f }
+        }
+    })
+
+    # Path Queue Timer
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 500
+    $timer.Add_Tick({
+        if (Test-Path $queueFile) {
+            try {
+                $queuedPaths = Get-Content $queueFile -ErrorAction SilentlyContinue
+                Remove-Item $queueFile -ErrorAction SilentlyContinue
+                foreach ($p in $queuedPaths) { Add-Path $p }
+            } catch {}
+        }
+    })
+    $timer.Start()
+
+    # Schedule Logic
+    $scheduleBtn.Add_Click({
+        if ($allPaths.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Please add at least one file to schedule.", "Empty List")
+            return
+        }
+
+        $targetTime = $dtPicker.Value
+        if ($targetTime -le (Get-Date)) {
+            $targetTime = (Get-Date).AddMinutes(1) # Fallback to 1 min if user set past
+            $dtPicker.Value = $targetTime
+        }
+
+        $statusLabel.Text = "REGISTERING TASK..."
+        $statusLabel.Foreground = [System.Windows.Media.Brushes]::Gold
+        $scheduleBtn.IsEnabled = $false
+
+        try {
+            Register-DeletionTask -Paths ($allPaths | ForEach-Object {$_}) -ExecutionTime $targetTime
+            [System.Windows.Forms.MessageBox]::Show("Deletion scheduled successfully for $($targetTime.ToString('f'))", "Task Active")
+            $window.Close()
+        } catch {
+            Log-Msg "Schedule Error: $($_.Exception.Message)"
+            $statusLabel.Text = "FAILED TO SCHEDULE"
+            $statusLabel.Foreground = [System.Windows.Media.Brushes]::Red
+            $scheduleBtn.IsEnabled = $true
+            [System.Windows.Forms.MessageBox]::Show("Failed to register task: $($_.Exception.Message)", "Error")
+        }
+    })
+
+    $window.Add_Closed({
+        $timer.Stop()
+        if ($mutex) {
+            $mutex.ReleaseMutex()
+            $mutex.Dispose()
+        }
+        if (Test-Path $queueFile) { Remove-Item $queueFile -ErrorAction SilentlyContinue }
+    })
+
+    # Bring to front
+    Log-Msg "Showing window"
+    $window.Show()
+    $window.Activate()
+    $window.Topmost = $false
+    
+    # WPF loop
+    [System.Windows.Threading.Dispatcher]::Run() | Out-Null
+
+} catch {
+    Log-Msg "FATAL ERROR: $($_.Exception.Message)"
+    [System.Windows.Forms.MessageBox]::Show("Fatal error: $($_.Exception.Message)", "ScheduleDelete Error")
+}
+
+================================================================================
+TIMESTAMP: 2026-07-28 14:00:00
+FILE PATH: ScheduleDeleteContextMenu.reg
+ACTION: Created
+================================================================================
+Windows Registry Editor Version 5.00
+
+; Cascaded Context Menu for Files
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete]
+@="Schedule Delete..."
+"Icon"="shell32.dll,27"
+"SubCommands"=""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\open]
+@="Open Scheduler UI"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\open\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\1hour]
+@="Delete in 1 Hour"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\1hour\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 60 \"%1\""
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\24hours]
+@="Delete in 24 Hours"
+
+[HKEY_CLASSES_ROOT\*\shell\ScheduleDelete\shell\24hours\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 1440 \"%1\""
+
+; Cascaded Context Menu for Directories
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete]
+@="Schedule Delete..."
+"Icon"="shell32.dll,27"
+"SubCommands"=""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\open]
+@="Open Scheduler UI"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\open\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\1hour]
+@="Delete in 1 Hour"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\1hour\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 60 \"%1\""
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\24hours]
+@="Delete in 24 Hours"
+
+[HKEY_CLASSES_ROOT\Directory\shell\ScheduleDelete\shell\24hours\command]
+@="\"C:\\Program Files\\ScheduleDelete\\ScheduleDelete.bat\" -Silent -DelayMinutes 1440 \"%1\""
+
+================================================================================
+TIMESTAMP: 2026-07-28 14:00:00
+FILE PATH: ScheduleDelete.bat
+ACTION: Created
+================================================================================
+@echo off
+setlocal enabledelayedexpansion
+
+:: Elevation Check & Auto-Elevation
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [Admin Required] Requesting administrative privileges...
+    powershell -Command "Start-Process -FilePath \"!comspec!\" -ArgumentList \"/c \"\"%~0\"\" %*\" -Verb RunAs"
+    exit /b
+)
+
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT=%SCRIPT_DIR%ScheduleDelete.ps1"
+
+if not exist "!SCRIPT!" (
+    echo Error: ScheduleDelete.ps1 not found in !SCRIPT_DIR!
+    pause
+    exit /b 1
+)
+
+:: Run PowerShell script with all arguments passed
+:: Using -WindowStyle Hidden for a clean "app-like" experience
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!SCRIPT!" %*
+
+================================================================================
+TIMESTAMP: 2026-07-28 14:00:00
+FILE PATH: TotalCleanup.bat
+ACTION: Created
+================================================================================
+@echo off
+setlocal enabledelayedexpansion
+
+echo ===================================================
+echo   ScheduleDelete TOTAL CLEANUP & FRESH START
+echo ===================================================
+echo.
+
+:: Request Admin Privileges
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo Requesting administrative privileges...
+    powershell -Command "Start-Process '%~0' -Verb RunAs"
+    exit /b
+)
+
+echo 1. Cleaning up Registry...
+reg delete "HKCR\*\shell\ScheduleDelete" /f >nul 2>&1
+reg delete "HKCR\Directory\shell\ScheduleDelete" /f >nul 2>&1
+echo [OK] Registry cleaned.
+
+echo 2. Cleaning up Scheduled Tasks...
+powershell -Command "Get-ScheduledTask -TaskName 'DeleteScheduled_*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false" >nul 2>&1
+echo [OK] Tasks cleaned.
+
+echo 3. Cleaning up Files...
+set "INSTALL_DIR=C:\Program Files\ScheduleDelete"
+if exist "!INSTALL_DIR!" (
+    rmdir /s /q "!INSTALL_DIR!" >nul 2>&1
+)
+set "APPDATA_DIR=%APPDATA%\ScheduleDelete"
+if exist "!APPDATA_DIR!" (
+    rmdir /s /q "!APPDATA_DIR!" >nul 2>&1
+)
+echo [OK] Files cleaned.
+
+echo.
+echo ===================================================
+echo   CLEANUP COMPLETE!
+echo   Please run the new Setup file (v2.4.0) now.
+echo ===================================================
+pause
+
+================================================================================
+TIMESTAMP: 2026-07-28 14:00:00
+FILE PATH: README.md
+ACTION: Created
+================================================================================
+# ScheduleDelete
+
+## Overview
+
+ScheduleDelete is a sophisticated task and appointment management system designed to help users efficiently manage their schedules, tasks, and deadlines. Built with modern web technologies, ScheduleDelete provides a comprehensive solution for personal and professional schedule management with advanced features like calendar integration, task prioritization, and deadline tracking.
+
+## Key Features
+
+- **Calendar Integration**: Seamless integration with Google Calendar, Outlook, and other calendar services
+- **Task Management**: Create, organize, and prioritize tasks with due dates and dependencies
+- **Schedule Management**: Manage appointments, meetings, and events with drag-and-drop functionality
+- **Deadline Tracking**: Automatic deadline reminders and notifications
+- **Collaboration**: Share schedules and tasks with team members
+- **Reporting**: Generate reports and analytics on productivity and time management
+- **Mobile Access**: Access your schedule from any device with mobile-responsive design
+- **Automation**: Automate recurring events and task reminders
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | React, TypeScript, Tailwind CSS, Day.js |
+| Backend | Node.js, Express, GraphQL |
+| Database | PostgreSQL, Redis |
+| Authentication | JWT, OAuth 2.0 |
+| Calendar Integration | Google Calendar API, Outlook API |
+| Build Tools | Vite, ESBuild |
+| Deployment | Docker, Kubernetes |
+
+## Project Structure
+
+```
+ScheduleDelete/
+├── client/               # Frontend application
+│   ├── src/             # Source code
+│   │   ├── components/  # React components
+│   │   ├── features/    # Application features
+│   │   ├── hooks/      # Custom hooks
+│   │   ├── services/    # API services
+│   │   ├── stores/      # State management
+│   │   └── utils/       # Utility functions
+│   ├── public/          # Static assets
+│   └── tests/           # Test files
+├── server/               # Backend application
+│   ├── src/             # Source code
+│   │   ├── api/          # API routes
+│   │   ├── models/       # Database models
+│   │   ├── services/     # Business logic
+│   │   ├── utils/        # Utility functions
+│   │   └── config/       # Configuration
+│   └── tests/           # Test files
+├── docs/                 # Documentation
+├── scripts/              # Deployment scripts
+├── docker/              # Docker configuration
+└── README.md             # This file
+```
+
+## Installation
+
+### System Requirements
+
+- Node.js 18+
+- PostgreSQL 14+
+- Redis 6+
+- npm or pnpm
+
+### Installation Steps
+
+#### Clone Repository
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/scheduledelete.git
+# Navigate to the project directory
+cd scheduledelete
+```
+
+#### Install Dependencies
+
+```bash
+# Install frontend dependencies
+cd client
+npm install
+# or
+pnpm install
+
+# Navigate to server directory
+cd ../server
+
+# Install backend dependencies
+npm install
+# or
+pnpm install
+```
+
+#### Configure Environment
+
+Create a `.env` file in the server directory:
+
+```env
+# Database Configuration
+DATABASE_URL=postgresql://username:password@localhost:5432/scheduledelete
+REDIS_URL=redis://localhost:6379
+
+# JWT Secret
+JWT_SECRET=your-secret-key-here
+
+# Server Configuration
+PORT=3000
+NODE_ENV=development
+
+# Google Calendar API
+GOOGLE_CALENDAR_CLIENT_ID=your-client-id
+GOOGLE_CALENDAR_CLIENT_SECRET=your-client-secret
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
+
+# CORS Origin
+CORS_ORIGIN=http://localhost:3000
+```
+
+#### Run Database
+
+```bash
+# Create database and tables
+# Use your preferred PostgreSQL client
+# Run SQL scripts from server/scripts/
+```
+
+#### Run Redis
+
+```bash
+# Start Redis server
+redis-server
+```
+
+#### Start Application
+
+```bash
+# Start backend server
+cd server
+npm run dev
+
+# Start frontend application
+cd client
+npm run dev
+
+# Open browser to http://localhost:3000
+```
+
+## Usage
+
+### Basic Usage
+
+1. **Login/Register**
+   - Click "Login" button
+   - Enter credentials or use OAuth
+   - Access your dashboard
+
+2. **View Calendar**
+   - Navigate between months using arrow buttons
+   - Use drag-and-drop to move events
+   - Click on time slots to create new events
+
+3. **Manage Tasks**
+   - Click "Tasks" tab
+   - Create new tasks with due dates
+   - Set priorities and categories
+   - Assign tasks to team members
+
+4. **View Schedule**
+   - Click "Schedule" tab
+   - See upcoming appointments
+   - Manage meeting invitations
+   - Set up recurring events
+
+### Advanced Features
+
+- **Calendar Integration**: Connect multiple calendar services
+- **Task Dependencies**: Set up task dependencies and workflows
+- **Team Collaboration**: Share schedules and tasks with team members
+- **Analytics**: View productivity reports and analytics
+- **Automation**: Set up automated reminders and recurring events
+- **Mobile Access**: Access from mobile devices with responsive design
+- **Export/Import**: Export data to CSV or import from other applications
+
+## Configuration
+
+### Environment Configuration
+
+Create a `.env` file in the server directory with the following options:
+
+```env
+# Database Configuration
+DATABASE_URL=postgresql://username:password@localhost:5432/scheduledelete
+REDIS_URL=redis://localhost:6379
+DATABASE_POOL_SIZE=20
+DATABASE_MAX_IDLE_TIME=3000
+
+# JWT Configuration
+JWT_SECRET=your-secret-key-here
+JWT_EXPIRES_IN=86400
+
+# Server Configuration
+PORT=3000
+NODE_ENV=development
+HOST=0.0.0.0
+CORS_ORIGIN=http://localhost:3000
+TRUST_PROXY_COUNT=0
+
+# Google Calendar API
+GOOGLE_CALENDAR_CLIENT_ID=your-client-id
+GOOGLE_CALENDAR_CLIENT_SECRET=your-client-secret
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
+GOOGLE_CALENDAR_SCOPES=https://www.googleapis.com/auth/calendar.readonly
+
+# Rate Limiting
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_REQUESTS=100
+
+# Logging
+LOG_LEVEL=info
+LOG_FILE=logs/server.log
+```
+
+### Application Configuration
+
+The application supports various configuration options:
+
+- **Theme Settings**: Light/dark mode preferences
+- **Notification Settings**: Customize notification preferences
+- **Calendar Settings**: Default calendar views and time zones
+- **Task Settings**: Default task categories and priorities
+- **Integration Settings**: Configure third-party integrations
+
+## Build Targets
+
+### Development
+
+| Target | Command | Description |
+|--------|---------|-------------|
+| `npm run dev` | Start development server | Hot reload, linting, type checking |
+| `npm run build` | Build for production | Minified, optimized bundles |
+| `npm run preview` | Preview production build | Local preview server |
+
+### Production
+
+| Platform | Command | Description |
+|----------|---------|-------------|
+| Docker | `docker-compose up --build` | Full stack deployment |
+| Kubernetes | `kubectl apply -f k8s/` | Kubernetes deployment |
+| Static Hosting | `npm run build` | Deploy static files |
+
+### Docker Deployment
+
+```bash
+# Build and start all services
+docker-compose up --build
+
+# Build images only
+docker-compose build
+
+# Start services in background
+docker-compose up -d
+
+# Stop services
+docker-compose down
+```
+
+### Kubernetes Deployment
+
+```bash
+# Apply Kubernetes manifests
+kubectl apply -f k8s/
+
+# Deploy with namespace
+kubectl apply -f k8s/ --namespace=scheduledelete
+
+# View deployment status
+kubectl get deployments
+```
+
+## Development
+
+### Running in Development Mode
+
+```bash
+# Start backend server
+cd server
+npm run dev
+
+# Start frontend application in another terminal
+cd client
+npm run dev
+
+# Open browser to http://localhost:3000
+```
+
+### Building for Production
+
+```bash
+# Build frontend
+cd client
+npm run build
+
+# Build backend
+cd server
+npm run build
+
+# Create Docker image
+docker build -t scheduledelete .
+```
+
+### Testing
+
+```bash
+# Run unit tests
+cd client
+npm test
+cd ../server
+npm test
+
+# Run integration tests
+cd client
+npm run test:integration
+cd ../server
+npm run test:integration
+
+# Run e2e tests
+cd client
+npm run test:e2e
+```
+
+## Deployment
+
+### Production Deployment
+
+ScheduleDelete can be deployed to various platforms:
+
+- **Cloud Platforms**: AWS ECS, Google Cloud Run, Azure Container Instances
+- **Container Orchestration**: Kubernetes, Docker Swarm
+- **Static Hosting**: Vercel, Netlify, AWS S3 + CloudFront
+- **Server Hosting**: Direct deployment to VPS or dedicated servers
+
+### Docker Deployment
+
+```bash
+# Build the Docker image
+docker build -t scheduledelete .
+
+# Run the application
+docker run -p 3000:3000 scheduledelete
+
+# With environment variables
+docker run -p 3000:3000 \
+  -e DATABASE_URL=postgresql://username:password@localhost:5432/scheduledelete \
+  -e REDIS_URL=redis://localhost:6379 \
+  -e JWT_SECRET=your-secret-key \
+  scheduledelete
+```
+
+### Kubernetes Deployment
+
+```bash
+# Create namespace
+kubectl create namespace scheduledelete
+
+# Apply Kubernetes manifests
+kubectl apply -f k8s/ --namespace=scheduledelete
+
+# Expose service
+kubectl expose deployment scheduledelete-server \
+  --port=3000 --type=LoadBalancer \
+  --namespace=scheduledelete
+
+# Get service URL
+kubectl get svc scheduledelete-server \
+  --namespace=scheduledelete -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+## Contributing
+
+### Contribution Guidelines
+
+1. **Fork the repository**
+2. **Create a feature branch**
+3. **Make your changes**
+4. **Add tests**
+5. **Commit your changes**
+6. **Push to your branch**
+7. **Create a pull request**
+
+### Code Quality
+
+- Follow ESLint and Prettier for code formatting
+- Write comprehensive unit and integration tests
+- Keep commit messages clear and descriptive
+- Update documentation as needed
+- Follow TypeScript best practices
+
+## Troubleshooting
+
+### Common Issues
+
+#### Application Won't Start
+
+1. **Check dependencies**
+   ```bash
+   npm install
+   ```
+
+2. **Check environment variables**
+   Ensure all required environment variables are set
+
+3. **Check port availability**
+   Ensure port 3000 is available
+
+#### Build Errors
+
+1. **Clean node_modules**
+   ```bash
+   rm -rf node_modules
+   npm install
+   ```
+
+2. **Check TypeScript configuration**
+   Ensure tsconfig.json is correctly configured
+
+#### Database Issues
+
+1. **Check database connection**
+   Ensure PostgreSQL and Redis are running
+
+2. **Check database schema**
+   Ensure all required tables are created
+
+#### Performance Issues
+
+1. **Clear browser cache**
+   - Go to `chrome://settings/`
+   - Click "Clear browsing data"
+   - Select "Cached images and files"
+
+2. **Check for memory leaks**
+   Use browser developer tools to monitor memory usage
+
+## Support
+
+### Getting Help
+
+- **GitHub Issues**: Report bugs and request features
+- **Documentation**: Check the official documentation
+- **Community**: Join the community forums
+
+### Reporting Issues
+
+When reporting an issue, please include:
+
+- **Description of the problem**
+- **Steps to reproduce**
+- **Expected behavior**
+- **Actual behavior**
+- **Environment details** (OS, version, dependencies, etc.)
+
+## License
+
+ScheduleDelete is licensed under the MIT License. See the `LICENSE` file for more details.
+
+## Acknowledgements
+
+- **React**: For building a powerful UI library
+- **TypeScript**: For type safety
+- **Node.js**: For backend development
+- **PostgreSQL**: For database management
+- **Redis**: For caching and session management
+- **Tailwind CSS**: For styling
+- **All contributors**: For making this project better
+
+## Contact
+
+- **Website**: https://scheduledelete.example.com
+- **Email**: support@example.com
+- **GitHub**: https://github.com/example/scheduledelete
+- **Twitter**: @scheduledelete
+
+---
+
+*ScheduleDelete - Your Ultimate Schedule Management Solution*
+
+================================================================================
